@@ -1,0 +1,105 @@
+#!/bin/bash
+#
+# Start Strix in QEMU.
+#
+# Usage: qemu-ppc-run [OPTION] FOLDER
+#
+# Launch QEMU with kernel FOLDER/kernel.elf and initrd FOLDER/image.bin.
+#
+# You can change QEMU executable and pass additional options to it through
+# environment variable QEMU.
+#
+# Options:
+#  -p TELNET_PORT       use TELNET_PORT for COM1,COM2,COM3,COM4 telnet redirection
+#  -t TSTRING           exit with success when string TSTRING is met
+#  -w WAIT              exit with error if TSTRING is not met during WAIT seconds
+
+
+# Abort at error return code and unbounded variables
+set -e -u
+
+TELNET_PORT=30000
+TSTRING='SOME STRING UNLIKELY TO BE MET IN OS OUTPUT'
+WAIT=60
+LOAD_TIMEOUT=15
+IMAGE_INFO_ADDR=0x2000000
+
+# Print error message and exit
+error()
+{
+   echo "ERROR: $1" >&2
+   exit 1
+}
+
+# Parse options
+OPTIND=1
+while getopts "p:t:w:" opt; do
+   case "$opt" in
+      p) TELNET_PORT=${OPTARG}
+      ;;
+      t) TSTRING=${OPTARG}
+      ;;
+      w) WAIT=${OPTARG}
+      ;;
+   esac
+done
+shift $((OPTIND-1))
+
+# Check args
+[ "${TELNET_PORT}" -eq "${TELNET_PORT}" ] 2>/dev/null || error "invalid argument"
+[ ${TELNET_PORT} -gt 0 ] || error "invalid argument"
+[ "${WAIT}" -eq "${WAIT}" ] 2>/dev/null || error "invalid argument"
+[ ${WAIT} -gt 0 ] || error "invalid argument"
+[ $# -ne 1 ] && error "wrong arguments, see usage in the header of this script"
+
+# Check image folder
+IMGPATH=$1
+[ ! -d ${IMGPATH} ] && error "${IMGPATH} is not a folder"
+
+# Check kernel and image
+# [ ! -f ${IMGPATH}/kernel.elf ] && error "there is no kernel in ${IMGPATH}"
+# [ ! -f ${IMGPATH}/image.bin ] && error "there is no image in ${IMGPATH}"
+
+# Run qemu
+if [ -z ${QEMU+x} ]; then QEMU='qemu-system-ppc'; fi
+echo "Starting QEMU: ${QEMU}"
+echo "${QEMU}          -nodefaults  -nographic   -m 1024      -M mpc8544ds -serial telnet:localhost:${TELNET_PORT},server -serial telnet:localhost:$((${TELNET_PORT}+1)),server,nowait -serial telnet:localhost:$((${TELNET_PORT}+2)),server,nowait -serial telnet:localhost:$((${TELNET_PORT}+3)),server,nowait -kernel ${IMGPATH}/cold.bin   "
+${QEMU}          \
+    -nodefaults  \
+    -nographic   \
+    -m 2048      \
+    -M mpc8544ds \
+    -serial telnet:localhost:${TELNET_PORT},server \
+    -serial telnet:localhost:$((${TELNET_PORT}+1)),server,nowait \
+    -serial telnet:localhost:$((${TELNET_PORT}+2)),server,nowait \
+    -serial telnet:localhost:$((${TELNET_PORT}+3)),server,nowait \
+    -kernel ${IMGPATH}/cold.bin   \
+    > /dev/null &
+QEMU_PID=$!
+trap 'CODE=$?; kill ${QEMU_PID}; exit ${CODE}' EXIT ERR
+sleep 1
+
+# Run expect
+echo "Connecting to serial console"
+time -p expect -<<EXPECT_END
+set send_slow {1 .01}
+
+# Connect to console
+spawn telnet localhost ${TELNET_PORT}
+
+# Wait while OS kernel is loading
+set timeout ${LOAD_TIMEOUT}
+expect {
+   timeout                     { send_user "\nError: OS kernel load timeout\n"; exit 1 }
+   "Welcome to RTOS"
+}
+
+# Wait for OS termination
+set timeout ${WAIT}
+expect {
+   timeout                     { send_user "\nError: OS execution timeout\n"; exit 1 }
+   "${TSTRING}"
+}
+
+send_user "\n"
+EXPECT_END
